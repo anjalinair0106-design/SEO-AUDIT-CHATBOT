@@ -132,6 +132,26 @@ const severityConfig = {
 };
 
 const gradeColor = { A: "#16a34a", B: "#65a30d", C: "#f59e0b", D: "#f97316", F: "#ef4444" };
+const HISTORY_STORAGE_KEY = "seo_audit_history_v1";
+
+function loadAuditHistory() {
+  try {
+    const raw = localStorage.getItem(HISTORY_STORAGE_KEY);
+    const parsed = JSON.parse(raw || "[]");
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(
+      item => item && typeof item === "object" && item.id && item.url && item.report
+    );
+  } catch {
+    return [];
+  }
+}
+
+function formatAuditDate(dateString) {
+  const dt = new Date(dateString);
+  if (Number.isNaN(dt.getTime())) return "";
+  return dt.toLocaleString([], { year: "numeric", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+}
 
 export default function SEOAuditChatbot() {
   const [url, setUrl] = useState("");
@@ -143,12 +163,22 @@ export default function SEOAuditChatbot() {
   const [loading, setLoading] = useState(false);
   const [auditReport, setAuditReport] = useState(null);
   const [auditUrl, setAuditUrl] = useState("");
+  const [currentAuditId, setCurrentAuditId] = useState("");
+  const [auditHistory, setAuditHistory] = useState(() => loadAuditHistory());
   const [loadingMsg, setLoadingMsg] = useState("");
   const messagesEndRef = useRef(null);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, loading]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify(auditHistory));
+    } catch {
+      // Ignore storage errors (private mode, quota exceeded, etc.)
+    }
+  }, [auditHistory]);
 
   const loadingSteps = [
     "Fetching page content...",
@@ -162,6 +192,17 @@ export default function SEOAuditChatbot() {
     "Write an improved title tag and meta description.",
     "Give me a 7-day SEO action plan from this audit."
   ];
+
+  function hydrateAuditFromHistory(entry, announce = true) {
+    setAuditReport(entry.report);
+    setAuditUrl(entry.url);
+    setCurrentAuditId(entry.id);
+    setUrl(entry.url);
+    setActiveTab("report");
+    if (announce) {
+      setMessages(prev => [...prev, { role: "bot", content: `Loaded audit from ${formatAuditDate(entry.createdAt)} for ${entry.url.replace(/^https?:\/\//, "")}.` }]);
+    }
+  }
 
   async function handleAudit() {
     if (!url.trim()) return;
@@ -183,8 +224,20 @@ export default function SEOAuditChatbot() {
       const html = await fetchPageContent(cleanUrl);
       const pageContent = extractPageInfo(html);
       const report = await runAudit(cleanUrl, pageContent);
+      const entry = {
+        id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        createdAt: new Date().toISOString(),
+        url: cleanUrl,
+        score: Number(report?.score || 0),
+        grade: report?.grade || "N/A",
+        criticalCount: Array.isArray(report?.issues) ? report.issues.filter(i => i.severity === "critical").length : 0,
+        warningCount: Array.isArray(report?.issues) ? report.issues.filter(i => i.severity === "warning").length : 0,
+        report
+      };
       setAuditReport(report);
       setAuditUrl(cleanUrl);
+      setCurrentAuditId(entry.id);
+      setAuditHistory(prev => [entry, ...prev].slice(0, 25));
       setMessages(prev => [
         ...prev,
         { role: "bot", content: report.chatMessage || "Audit complete. Switch to the Report tab for full details." }
@@ -231,6 +284,18 @@ export default function SEOAuditChatbot() {
 
   const criticalCount = auditReport?.issues?.filter(i => i.severity === "critical").length || 0;
   const warningCount = auditReport?.issues?.filter(i => i.severity === "warning").length || 0;
+  const historyForCurrentUrl = auditHistory.filter(item => item.url === auditUrl);
+  const previousAudit = historyForCurrentUrl.find(item => item.id !== currentAuditId) || null;
+  const previousCriticalCount = previousAudit?.criticalCount || 0;
+  const previousWarningCount = previousAudit?.warningCount || 0;
+  const scoreDelta = previousAudit ? (Number(auditReport?.score || 0) - Number(previousAudit.score || 0)) : null;
+  const criticalDelta = previousAudit ? (criticalCount - previousCriticalCount) : null;
+  const warningDelta = previousAudit ? (warningCount - previousWarningCount) : null;
+
+  const currentIssueTitles = new Set((auditReport?.issues || []).map(issue => issue.title));
+  const previousIssueTitles = new Set((previousAudit?.report?.issues || []).map(issue => issue.title));
+  const introducedIssues = [...currentIssueTitles].filter(title => !previousIssueTitles.has(title));
+  const resolvedIssues = [...previousIssueTitles].filter(title => !currentIssueTitles.has(title));
 
   return (
     <div style={{ minHeight: "100vh", background: "#071019", color: "#dbe7f1", fontFamily: "'DM Sans', 'Segoe UI', sans-serif", display: "flex", flexDirection: "column", position: "relative" }}>
@@ -440,6 +505,101 @@ export default function SEOAuditChatbot() {
               </div>
             ) : (
               <>
+                <div className="surface" style={{ borderRadius: 14, padding: 16 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, marginBottom: 12, flexWrap: "wrap" }}>
+                    <div style={{ fontSize: 12, fontWeight: 700, color: "#8ab0c6", letterSpacing: "0.08em", textTransform: "uppercase" }}>
+                      Audit History
+                    </div>
+                    {auditHistory.length > 0 && (
+                      <button
+                        onClick={() => setAuditHistory([])}
+                        style={{ background: "#2a1111", border: "1px solid #5a2323", color: "#fca5a5", borderRadius: 8, fontSize: 12, padding: "5px 9px", cursor: "pointer" }}
+                      >
+                        Clear History
+                      </button>
+                    )}
+                  </div>
+
+                  {auditHistory.length === 0 ? (
+                    <p style={{ fontSize: 13, color: "#7796aa" }}>No saved audits yet. Run an audit to start building history.</p>
+                  ) : (
+                    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                      {auditHistory.slice(0, 8).map(item => (
+                        <button
+                          key={item.id}
+                          onClick={() => hydrateAuditFromHistory(item, false)}
+                          style={{
+                            textAlign: "left",
+                            background: item.id === currentAuditId ? "#103049" : "#0b1d2b",
+                            border: item.id === currentAuditId ? "1px solid #23668a" : "1px solid #164059",
+                            borderRadius: 10,
+                            color: "#d4e9f7",
+                            padding: "10px 12px",
+                            cursor: "pointer",
+                            display: "flex",
+                            justifyContent: "space-between",
+                            gap: 12,
+                            flexWrap: "wrap"
+                          }}
+                        >
+                          <span style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+                            <span style={{ fontSize: 13, fontWeight: 600 }}>{item.url.replace(/^https?:\/\//, "").slice(0, 55)}</span>
+                            <span style={{ fontSize: 11, color: "#86a6bb" }}>{formatAuditDate(item.createdAt)}</span>
+                          </span>
+                          <span style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, color: "#9ec7de" }}>
+                            <span>Score {item.score}</span>
+                            <span style={{ color: gradeColor[item.grade] || "#9ec7de", fontWeight: 700 }}>{item.grade}</span>
+                            <span style={{ color: "#fca5a5" }}>C {item.criticalCount}</span>
+                            <span style={{ color: "#fcd34d" }}>W {item.warningCount}</span>
+                          </span>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                {previousAudit && (
+                  <div className="surface" style={{ borderRadius: 14, padding: 16 }}>
+                    <div style={{ fontSize: 12, fontWeight: 700, color: "#8ab0c6", letterSpacing: "0.08em", textTransform: "uppercase", marginBottom: 12 }}>
+                      Compare With Previous ({formatAuditDate(previousAudit.createdAt)})
+                    </div>
+                    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(120px, 1fr))", gap: 10 }}>
+                      <div style={{ background: "#0b1d2b", border: "1px solid #164059", borderRadius: 10, padding: 10 }}>
+                        <div style={{ fontSize: 11, color: "#84a6ba", marginBottom: 5 }}>Score Delta</div>
+                        <div style={{ fontSize: 16, fontWeight: 700, color: (scoreDelta || 0) >= 0 ? "#86efac" : "#fca5a5" }}>
+                          {(scoreDelta || 0) >= 0 ? "+" : ""}{scoreDelta}
+                        </div>
+                      </div>
+                      <div style={{ background: "#0b1d2b", border: "1px solid #164059", borderRadius: 10, padding: 10 }}>
+                        <div style={{ fontSize: 11, color: "#84a6ba", marginBottom: 5 }}>Critical Delta</div>
+                        <div style={{ fontSize: 16, fontWeight: 700, color: (criticalDelta || 0) <= 0 ? "#86efac" : "#fca5a5" }}>
+                          {(criticalDelta || 0) > 0 ? "+" : ""}{criticalDelta}
+                        </div>
+                      </div>
+                      <div style={{ background: "#0b1d2b", border: "1px solid #164059", borderRadius: 10, padding: 10 }}>
+                        <div style={{ fontSize: 11, color: "#84a6ba", marginBottom: 5 }}>Warning Delta</div>
+                        <div style={{ fontSize: 16, fontWeight: 700, color: (warningDelta || 0) <= 0 ? "#86efac" : "#fca5a5" }}>
+                          {(warningDelta || 0) > 0 ? "+" : ""}{warningDelta}
+                        </div>
+                      </div>
+                    </div>
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginTop: 10 }}>
+                      <div style={{ background: "#0b1d2b", border: "1px solid #164059", borderRadius: 10, padding: 10 }}>
+                        <div style={{ fontSize: 11, color: "#84a6ba", marginBottom: 6 }}>Introduced Issues ({introducedIssues.length})</div>
+                        <div style={{ fontSize: 12, color: "#d4e9f7", lineHeight: 1.5 }}>
+                          {introducedIssues.length ? introducedIssues.slice(0, 3).join(", ") : "None"}
+                        </div>
+                      </div>
+                      <div style={{ background: "#0b1d2b", border: "1px solid #164059", borderRadius: 10, padding: 10 }}>
+                        <div style={{ fontSize: 11, color: "#84a6ba", marginBottom: 6 }}>Resolved Issues ({resolvedIssues.length})</div>
+                        <div style={{ fontSize: 12, color: "#d4e9f7", lineHeight: 1.5 }}>
+                          {resolvedIssues.length ? resolvedIssues.slice(0, 3).join(", ") : "None"}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
                 <div className="surface" style={{ borderRadius: 16, padding: 24, display: "flex", gap: 24, alignItems: "center", flexWrap: "wrap" }}>
                   <div style={{ position: "relative", width: 90, height: 90, flexShrink: 0 }}>
                     <svg width="90" height="90" viewBox="0 0 90 90">
