@@ -60,69 +60,62 @@ function extractPageInfo(html) {
   return { text, html: truncated };
 }
 
+function getApiErrorMessage(data, fallback) {
+  return (
+    (typeof data?.error === "string" ? data.error : null) ||
+    data?.error?.message ||
+    data?.message ||
+    fallback
+  );
+}
+
 async function runAudit(url, pageContent) {
-  const response = await fetch("https://api.anthropic.com/v1/messages", {
+  const response = await fetch("/api/audit", {
     method: "POST",
     headers: {
-      "Content-Type": "application/json",
-      "x-api-key": import.meta.env.VITE_ANTHROPIC_API_KEY,
-      "anthropic-version": "2023-06-01",
-      "anthropic-dangerous-direct-browser-access": "true"
+      "Content-Type": "application/json"
     },
     body: JSON.stringify({
-      model: "claude-sonnet-4-20250514",
-      max_tokens: 2000,
-      system: SYSTEM_PROMPT,
-      messages: [
-        {
-          role: "user",
-          content: `Please audit this URL: ${url}\n\nPage HTML (truncated):\n${pageContent.html}\n\nExtracted text:\n${pageContent.text}`
-        }
-      ]
+      url,
+      pageContent
     })
   });
 
   const data = await response.json();
-  const raw = data.content?.[0]?.text || "{}";
-
-  try {
-    return JSON.parse(raw);
-  } catch {
-    const match = raw.match(/\{[\s\S]*\}/);
-    if (match) return JSON.parse(match[0]);
-    throw new Error("Invalid response format");
+  if (!response.ok) {
+    throw new Error(getApiErrorMessage(data, "Audit request failed"));
   }
+  return data;
 }
 
 async function askFollowUp(url, auditReport, question, history) {
-  const response = await fetch("https://api.anthropic.com/v1/messages", {
+  const conversationHistory = history
+    .slice(1)
+    .filter(m => m.role === "user" || m.role === "bot")
+    .map(m => ({
+      role: m.role === "bot" ? "assistant" : "user",
+      content: m.content
+    }));
+
+  const response = await fetch("/api/follow-up", {
     method: "POST",
     headers: {
-      "Content-Type": "application/json",
-      "x-api-key": import.meta.env.VITE_ANTHROPIC_API_KEY,
-      "anthropic-version": "2023-06-01",
-      "anthropic-dangerous-direct-browser-access": "true"
+      "Content-Type": "application/json"
     },
     body: JSON.stringify({
-      model: "claude-sonnet-4-20250514",
-      max_tokens: 1000,
-      system: "You are a helpful SEO expert. Answer questions about the audit results concisely and practically. Use plain text, no markdown.",
-      messages: [
-        {
-          role: "user",
-          content: `I ran an SEO audit on ${url}. Here are the results:\n${JSON.stringify(auditReport, null, 2)}\n\nUser question: ${question}`
-        },
-        ...history
-          .slice(1)
-          .filter(m => m.role !== "system")
-          .map(m => ({ role: m.role === "bot" ? "assistant" : "user", content: m.content })),
-        { role: "user", content: question }
-      ]
+      url,
+      auditReport,
+      question,
+      history: conversationHistory
     })
   });
 
   const data = await response.json();
-  return data.content?.[0]?.text || "Sorry, I could not process that.";
+  if (!response.ok) {
+    throw new Error(getApiErrorMessage(data, "Follow-up request failed"));
+  }
+
+  return data.answer || "Sorry, I could not process that.";
 }
 
 const severityConfig = {
@@ -243,10 +236,13 @@ export default function SEOAuditChatbot() {
         { role: "bot", content: report.chatMessage || "Audit complete. Switch to the Report tab for full details." }
       ]);
       setActiveTab("chat");
-    } catch {
+    } catch (error) {
       setMessages(prev => [
         ...prev,
-        { role: "bot", content: "I had trouble auditing that URL. Make sure it is a valid public URL and try again." }
+        {
+          role: "bot",
+          content: `I had trouble auditing that URL. ${error instanceof Error ? error.message : "Make sure it is a valid public URL and try again."}`
+        }
       ]);
     } finally {
       clearInterval(interval);
@@ -274,8 +270,11 @@ export default function SEOAuditChatbot() {
           { role: "bot", content: "Please run an audit first by entering a URL above. Then I can answer questions about the results." }
         ]);
       }
-    } catch {
-      setMessages(prev => [...prev, { role: "bot", content: "Sorry, something went wrong. Please try again." }]);
+    } catch (error) {
+      setMessages(prev => [
+        ...prev,
+        { role: "bot", content: `Sorry, something went wrong. ${error instanceof Error ? error.message : "Please try again."}` }
+      ]);
     } finally {
       setLoading(false);
       setLoadingMsg("");
