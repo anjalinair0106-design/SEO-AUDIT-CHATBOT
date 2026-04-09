@@ -96,6 +96,20 @@ function getErrorMessage(data, fallback) {
   return data?.error?.message || data?.message || fallback;
 }
 
+async function parseJsonResponse(response, fallbackMessage) {
+  const raw = await response.text();
+
+  if (!raw.trim()) {
+    throw new Error(fallbackMessage);
+  }
+
+  try {
+    return JSON.parse(raw);
+  } catch {
+    throw new Error(fallbackMessage);
+  }
+}
+
 function shouldUseMockFallback(error) {
   const message = String(error instanceof Error ? error.message : error || "").toLowerCase();
   return (
@@ -332,7 +346,7 @@ async function callAnthropic(payload) {
     body: JSON.stringify(payload)
   });
 
-  const data = await response.json();
+  const data = await parseJsonResponse(response, "Anthropic returned an empty or invalid JSON response");
   if (!response.ok) {
     throw new Error(getErrorMessage(data, "Anthropic request failed"));
   }

@@ -69,6 +69,20 @@ function getApiErrorMessage(data, fallback) {
   );
 }
 
+async function parseJsonResponse(response, fallbackMessage) {
+  const raw = await response.text();
+
+  if (!raw.trim()) {
+    throw new Error(fallbackMessage);
+  }
+
+  try {
+    return JSON.parse(raw);
+  } catch {
+    throw new Error(fallbackMessage);
+  }
+}
+
 async function runAudit(url, pageContent) {
   const response = await fetch("/api/audit", {
     method: "POST",
@@ -81,7 +95,7 @@ async function runAudit(url, pageContent) {
     })
   });
 
-  const data = await response.json();
+  const data = await parseJsonResponse(response, "The audit service returned an empty or invalid response.");
   if (!response.ok) {
     throw new Error(getApiErrorMessage(data, "Audit request failed"));
   }
@@ -110,7 +124,7 @@ async function askFollowUp(url, auditReport, question, history) {
     })
   });
 
-  const data = await response.json();
+  const data = await parseJsonResponse(response, "The follow-up service returned an empty or invalid response.");
   if (!response.ok) {
     throw new Error(getApiErrorMessage(data, "Follow-up request failed"));
   }
