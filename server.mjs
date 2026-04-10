@@ -1,9 +1,12 @@
 import { createServer } from "node:http";
-import { readFileSync, existsSync } from "node:fs";
-import { join } from "node:path";
+import { readFileSync, existsSync, mkdirSync } from "node:fs";
+import { join, dirname } from "node:path";
+import { randomUUID } from "node:crypto";
+import { DatabaseSync } from "node:sqlite";
 
 const PORT = Number(process.env.PORT || 8787);
 const ENV_PATH = join(process.cwd(), ".env");
+const DB_PATH = process.env.DATABASE_PATH || join(process.cwd(), "data", "seo-audit.sqlite");
 const ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages";
 
 const SYSTEM_PROMPT = `You are an expert SEO auditor. When given a URL and its page content (HTML/text), you analyze it thoroughly and return a JSON audit report.
@@ -74,6 +77,54 @@ function loadEnvFile() {
 
 loadEnvFile();
 
+mkdirSync(dirname(DB_PATH), { recursive: true });
+
+const db = new DatabaseSync(DB_PATH);
+db.exec(`
+  PRAGMA journal_mode = WAL;
+
+  CREATE TABLE IF NOT EXISTS audits (
+    id TEXT PRIMARY KEY,
+    url TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    score INTEGER NOT NULL,
+    grade TEXT NOT NULL,
+    critical_count INTEGER NOT NULL DEFAULT 0,
+    warning_count INTEGER NOT NULL DEFAULT 0,
+    report_json TEXT NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS follow_ups (
+    id TEXT PRIMARY KEY,
+    audit_id TEXT,
+    url TEXT NOT NULL,
+    question TEXT NOT NULL,
+    answer TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (audit_id) REFERENCES audits(id) ON DELETE SET NULL
+  );
+`);
+
+const insertAuditStatement = db.prepare(`
+  INSERT INTO audits (id, url, created_at, score, grade, critical_count, warning_count, report_json)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+`);
+
+const listAuditsStatement = db.prepare(`
+  SELECT id, url, created_at, score, grade, critical_count, warning_count, report_json
+  FROM audits
+  ORDER BY datetime(created_at) DESC
+  LIMIT ?
+`);
+
+const deleteFollowUpsStatement = db.prepare(`DELETE FROM follow_ups`);
+const deleteAuditsStatement = db.prepare(`DELETE FROM audits`);
+
+const insertFollowUpStatement = db.prepare(`
+  INSERT INTO follow_ups (id, audit_id, url, question, answer, created_at)
+  VALUES (?, ?, ?, ?, ?, ?)
+`);
+
 function isMockModeEnabled() {
   return String(process.env.MOCK_AUDITS || "").toLowerCase() === "true";
 }
@@ -82,10 +133,74 @@ function sendJson(res, status, body) {
   res.writeHead(status, {
     "Content-Type": "application/json",
     "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Methods": "POST, OPTIONS",
+    "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type"
   });
   res.end(JSON.stringify(body));
+}
+
+function countIssuesBySeverity(issues, severity) {
+  return Array.isArray(issues) ? issues.filter(issue => issue?.severity === severity).length : 0;
+}
+
+function saveAudit(url, report) {
+  const id = randomUUID();
+  const createdAt = new Date().toISOString();
+  const score = Number(report?.score || 0);
+  const grade = String(report?.grade || "N/A");
+  const criticalCount = countIssuesBySeverity(report?.issues, "critical");
+  const warningCount = countIssuesBySeverity(report?.issues, "warning");
+
+  insertAuditStatement.run(
+    id,
+    url,
+    createdAt,
+    score,
+    grade,
+    criticalCount,
+    warningCount,
+    JSON.stringify(report)
+  );
+
+  return {
+    id,
+    createdAt,
+    url,
+    score,
+    grade,
+    criticalCount,
+    warningCount,
+    report
+  };
+}
+
+function listAudits(limit = 25) {
+  return listAuditsStatement.all(Number(limit)).map(row => ({
+    id: row.id,
+    createdAt: row.created_at,
+    url: row.url,
+    score: row.score,
+    grade: row.grade,
+    criticalCount: row.critical_count,
+    warningCount: row.warning_count,
+    report: JSON.parse(row.report_json)
+  }));
+}
+
+function clearAudits() {
+  deleteFollowUpsStatement.run();
+  deleteAuditsStatement.run();
+}
+
+function saveFollowUp(auditId, url, question, answer) {
+  insertFollowUpStatement.run(
+    randomUUID(),
+    auditId || null,
+    url,
+    question,
+    answer,
+    new Date().toISOString()
+  );
 }
 
 function getApiKey() {
@@ -370,16 +485,20 @@ async function handleAudit(req, res) {
     });
 
     const raw = data.content?.[0]?.text || "{}";
-    sendJson(res, 200, parseAuditJson(raw));
+    const report = parseAuditJson(raw);
+    const entry = saveAudit(url, report);
+    sendJson(res, 200, { auditId: entry.id, createdAt: entry.createdAt, ...report });
   } catch (error) {
     if (!shouldUseMockFallback(error)) throw error;
     console.warn("Using mock audit fallback:", error instanceof Error ? error.message : error);
-    sendJson(res, 200, generateMockAudit(url, pageContent));
+    const report = generateMockAudit(url, pageContent);
+    const entry = saveAudit(url, report);
+    sendJson(res, 200, { auditId: entry.id, createdAt: entry.createdAt, ...report });
   }
 }
 
 async function handleFollowUp(req, res) {
-  const { url, auditReport, question, history } = await readRequestBody(req);
+  const { auditId, url, auditReport, question, history } = await readRequestBody(req);
   try {
     const data = await callAnthropic({
       model: "claude-sonnet-4-20250514",
@@ -395,12 +514,25 @@ ${JSON.stringify(auditReport, null, 2)}`,
       ]
     });
 
-    sendJson(res, 200, { answer: data.content?.[0]?.text || "Sorry, I could not process that." });
+    const answer = data.content?.[0]?.text || "Sorry, I could not process that.";
+    saveFollowUp(auditId, url, question || "", answer);
+    sendJson(res, 200, { answer });
   } catch (error) {
     if (!shouldUseMockFallback(error)) throw error;
     console.warn("Using mock follow-up fallback:", error instanceof Error ? error.message : error);
-    sendJson(res, 200, { answer: generateMockFollowUp(url, auditReport, question) });
+    const answer = generateMockFollowUp(url, auditReport, question);
+    saveFollowUp(auditId, url, question || "", answer);
+    sendJson(res, 200, { answer });
   }
+}
+
+function handleListAudits(_req, res) {
+  sendJson(res, 200, { audits: listAudits(25) });
+}
+
+function handleClearAudits(_req, res) {
+  clearAudits();
+  sendJson(res, 200, { success: true });
 }
 
 const server = createServer(async (req, res) => {
@@ -417,6 +549,16 @@ const server = createServer(async (req, res) => {
 
     if (req.method === "POST" && req.url === "/api/follow-up") {
       await handleFollowUp(req, res);
+      return;
+    }
+
+    if (req.method === "GET" && req.url === "/api/audits") {
+      handleListAudits(req, res);
+      return;
+    }
+
+    if (req.method === "DELETE" && req.url === "/api/audits") {
+      handleClearAudits(req, res);
       return;
     }
 

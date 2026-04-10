@@ -40,6 +40,7 @@ Results appear in two views:
 | AI Engine | Claude Sonnet 4 via Anthropic API |
 | Page Fetching | allorigins.win CORS proxy |
 | State Management | React `useState` / `useRef` |
+| Database | SQLite via Node `node:sqlite` |
 | Deployment | Vercel, Netlify, or any static host |
 
 ---
@@ -64,7 +65,8 @@ npm install
 # 3. Add your Anthropic API key
 cp .env.example .env
 # Then edit .env and add your key:
-# VITE_ANTHROPIC_API_KEY=your_api_key_here
+# ANTHROPIC_API_KEY=your_api_key_here
+# DATABASE_PATH=./data/seo-audit.sqlite
 
 # 4. Start the development server
 npm run dev
@@ -137,7 +139,9 @@ seo-audit-chatbot/
 Create a `.env` file in the project root:
 
 ```env
-VITE_ANTHROPIC_API_KEY=your_anthropic_api_key_here
+ANTHROPIC_API_KEY=your_anthropic_api_key_here
+DATABASE_PATH=./data/seo-audit.sqlite
+MOCK_AUDITS=false
 ```
 
 > ⚠️ **Never commit your `.env` file.** It is already listed in `.gitignore`.
@@ -167,7 +171,6 @@ Two types of Anthropic API calls are made:
 | No backlink analysis | Requires third-party SEO API (Ahrefs, Moz) |
 | Single-page audits only | Multi-page crawling not implemented in v1.0 |
 | No authenticated pages | CORS proxy cannot access login-protected pages |
-| No audit history | No database or user accounts in v1.0 |
 
 ---
 

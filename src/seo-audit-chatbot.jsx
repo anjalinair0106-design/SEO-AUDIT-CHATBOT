@@ -102,7 +102,7 @@ async function runAudit(url, pageContent) {
   return data;
 }
 
-async function askFollowUp(url, auditReport, question, history) {
+async function askFollowUp(url, auditReport, question, history, auditId) {
   const conversationHistory = history
     .slice(1)
     .filter(m => m.role === "user" || m.role === "bot")
@@ -117,6 +117,7 @@ async function askFollowUp(url, auditReport, question, history) {
       "Content-Type": "application/json"
     },
     body: JSON.stringify({
+      auditId,
       url,
       auditReport,
       question,
@@ -139,19 +140,24 @@ const severityConfig = {
 };
 
 const gradeColor = { A: "#16a34a", B: "#65a30d", C: "#f59e0b", D: "#f97316", F: "#ef4444" };
-const HISTORY_STORAGE_KEY = "seo_audit_history_v1";
-
-function loadAuditHistory() {
-  try {
-    const raw = localStorage.getItem(HISTORY_STORAGE_KEY);
-    const parsed = JSON.parse(raw || "[]");
-    if (!Array.isArray(parsed)) return [];
-    return parsed.filter(
-      item => item && typeof item === "object" && item.id && item.url && item.report
-    );
-  } catch {
-    return [];
+async function fetchAuditHistory() {
+  const response = await fetch("/api/audits");
+  const data = await parseJsonResponse(response, "The history service returned an empty or invalid response.");
+  if (!response.ok) {
+    throw new Error(getApiErrorMessage(data, "Could not load audit history"));
   }
+
+  return Array.isArray(data?.audits) ? data.audits : [];
+}
+
+async function clearAuditHistory() {
+  const response = await fetch("/api/audits", { method: "DELETE" });
+  const data = await parseJsonResponse(response, "The history service returned an empty or invalid response.");
+  if (!response.ok) {
+    throw new Error(getApiErrorMessage(data, "Could not clear audit history"));
+  }
+
+  return Boolean(data?.success);
 }
 
 function formatAuditDate(dateString) {
@@ -171,7 +177,7 @@ export default function SEOAuditChatbot() {
   const [auditReport, setAuditReport] = useState(null);
   const [auditUrl, setAuditUrl] = useState("");
   const [currentAuditId, setCurrentAuditId] = useState("");
-  const [auditHistory, setAuditHistory] = useState(() => loadAuditHistory());
+  const [auditHistory, setAuditHistory] = useState([]);
   const [loadingMsg, setLoadingMsg] = useState("");
   const messagesEndRef = useRef(null);
 
@@ -180,12 +186,30 @@ export default function SEOAuditChatbot() {
   }, [messages, loading]);
 
   useEffect(() => {
-    try {
-      localStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify(auditHistory));
-    } catch {
-      // Ignore storage errors (private mode, quota exceeded, etc.)
-    }
-  }, [auditHistory]);
+    let cancelled = false;
+
+    fetchAuditHistory()
+      .then(history => {
+        if (!cancelled) {
+          setAuditHistory(history);
+        }
+      })
+      .catch(error => {
+        if (!cancelled) {
+          setMessages(prev => [
+            ...prev,
+            {
+              role: "bot",
+              content: `I could not load saved audits from the database. ${error instanceof Error ? error.message : "Please try again."}`
+            }
+          ]);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const loadingSteps = [
     "Fetching page content...",
@@ -232,8 +256,8 @@ export default function SEOAuditChatbot() {
       const pageContent = extractPageInfo(html);
       const report = await runAudit(cleanUrl, pageContent);
       const entry = {
-        id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-        createdAt: new Date().toISOString(),
+        id: report.auditId,
+        createdAt: report.createdAt || new Date().toISOString(),
         url: cleanUrl,
         score: Number(report?.score || 0),
         grade: report?.grade || "N/A",
@@ -244,7 +268,7 @@ export default function SEOAuditChatbot() {
       setAuditReport(report);
       setAuditUrl(cleanUrl);
       setCurrentAuditId(entry.id);
-      setAuditHistory(prev => [entry, ...prev].slice(0, 25));
+      setAuditHistory(prev => [entry, ...prev.filter(item => item.id !== entry.id)].slice(0, 25));
       setMessages(prev => [
         ...prev,
         { role: "bot", content: report.chatMessage || "Audit complete. Switch to the Report tab for full details." }
@@ -276,7 +300,7 @@ export default function SEOAuditChatbot() {
 
     try {
       if (auditReport) {
-        const answer = await askFollowUp(auditUrl, auditReport, question, messages);
+        const answer = await askFollowUp(auditUrl, auditReport, question, messages, currentAuditId);
         setMessages(prev => [...prev, { role: "bot", content: answer }]);
       } else {
         setMessages(prev => [
@@ -525,7 +549,27 @@ export default function SEOAuditChatbot() {
                     </div>
                     {auditHistory.length > 0 && (
                       <button
-                        onClick={() => setAuditHistory([])}
+                        onClick={async () => {
+                          try {
+                            await clearAuditHistory();
+                            setAuditHistory([]);
+                            setCurrentAuditId("");
+                            setAuditReport(null);
+                            setAuditUrl("");
+                            setMessages(prev => [
+                              ...prev,
+                              { role: "bot", content: "Saved audit history was cleared from the database." }
+                            ]);
+                          } catch (error) {
+                            setMessages(prev => [
+                              ...prev,
+                              {
+                                role: "bot",
+                                content: `I could not clear saved audits. ${error instanceof Error ? error.message : "Please try again."}`
+                              }
+                            ]);
+                          }
+                        }}
                         style={{ background: "#2a1111", border: "1px solid #5a2323", color: "#fca5a5", borderRadius: 8, fontSize: 12, padding: "5px 9px", cursor: "pointer" }}
                       >
                         Clear History
