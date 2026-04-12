@@ -1,65 +1,5 @@
 import { useState, useRef, useEffect } from "react";
 
-const SYSTEM_PROMPT = `You are an expert SEO auditor. When given a URL and its page content (HTML/text), you analyze it thoroughly and return a JSON audit report.
-
-You MUST respond with ONLY a valid JSON object in this exact format:
-{
-  "summary": "2-3 sentence overview of the page's SEO health",
-  "score": <number 0-100>,
-  "grade": "<A/B/C/D/F>",
-  "issues": [
-    {
-      "category": "<On-Page SEO | Content Quality>",
-      "severity": "<critical | warning | info>",
-      "title": "<short issue title>",
-      "description": "<what the issue is>",
-      "fix": "<how to fix it>"
-    }
-  ],
-  "positives": ["<thing done well>"],
-  "onPage": {
-    "titleTag": "<extracted title or 'Missing'>",
-    "titleLength": 0,
-    "metaDescription": "<extracted meta or 'Missing'>",
-    "metaLength": 0,
-    "h1Count": 0,
-    "h1Text": "<first H1 text or 'Missing'>",
-    "h2Count": 0,
-    "h3Count": 0,
-    "canonicalTag": "<url or 'Missing'>",
-    "robots": "<content or 'Missing'>"
-  },
-  "content": {
-    "wordCount": 0,
-    "readabilityScore": "<Easy | Moderate | Difficult>",
-    "imagesWithoutAlt": 0,
-    "totalImages": 0,
-    "keywordDensityNote": "<observation about keyword usage>",
-    "contentIssues": ["<issue>"]
-  },
-  "chatMessage": "<A friendly conversational message summarizing the top 3 issues and what to do first. Use emojis sparingly.>"
-}
-
-Be thorough, specific, and actionable. Base everything on the actual page content provided.`;
-
-async function fetchPageContent(url) {
-  try {
-    const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(url)}`;
-    const res = await fetch(proxyUrl);
-    const data = await res.json();
-    return data.contents || "";
-  } catch {
-    return "";
-  }
-}
-
-function extractPageInfo(html) {
-  if (!html) return { text: "", html: "" };
-  const truncated = html.slice(0, 15000);
-  const text = truncated.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim().slice(0, 5000);
-  return { text, html: truncated };
-}
-
 function getApiErrorMessage(data, fallback) {
   return (
     (typeof data?.error === "string" ? data.error : null) ||
@@ -83,15 +23,14 @@ async function parseJsonResponse(response, fallbackMessage) {
   }
 }
 
-async function runAudit(url, pageContent) {
+async function runAudit(url) {
   const response = await fetch("/api/audit", {
     method: "POST",
     headers: {
       "Content-Type": "application/json"
     },
     body: JSON.stringify({
-      url,
-      pageContent
+      url
     })
   });
 
@@ -166,6 +105,10 @@ function formatAuditDate(dateString) {
   return dt.toLocaleString([], { year: "numeric", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
 }
 
+function getDisplayUrl(url) {
+  return String(url || "").replace(/^https?:\/\//, "");
+}
+
 export default function SEOAuditChatbot() {
   const [url, setUrl] = useState("");
   const [activeTab, setActiveTab] = useState("chat");
@@ -223,6 +166,10 @@ export default function SEOAuditChatbot() {
     "Write an improved title tag and meta description.",
     "Give me a 7-day SEO action plan from this audit."
   ];
+  const isMockAudit = Boolean(auditReport?._meta?.mock);
+  const sortedIssues = [...(auditReport?.issues || [])].sort(
+    (a, b) => ({ critical: 0, warning: 1, info: 2 }[a.severity] - { critical: 0, warning: 1, info: 2 }[b.severity])
+  );
 
   function hydrateAuditFromHistory(entry, announce = true) {
     setAuditReport(entry.report);
@@ -231,7 +178,8 @@ export default function SEOAuditChatbot() {
     setUrl(entry.url);
     setActiveTab("report");
     if (announce) {
-      setMessages(prev => [...prev, { role: "bot", content: `Loaded audit from ${formatAuditDate(entry.createdAt)} for ${entry.url.replace(/^https?:\/\//, "")}.` }]);
+      const note = entry.report?._meta?.mock ? " This saved audit used fallback mock data." : "";
+      setMessages(prev => [...prev, { role: "bot", content: `Loaded audit from ${formatAuditDate(entry.createdAt)} for ${getDisplayUrl(entry.url)}.${note}` }]);
     }
   }
 
@@ -252,9 +200,7 @@ export default function SEOAuditChatbot() {
     }, 1800);
 
     try {
-      const html = await fetchPageContent(cleanUrl);
-      const pageContent = extractPageInfo(html);
-      const report = await runAudit(cleanUrl, pageContent);
+      const report = await runAudit(cleanUrl);
       const entry = {
         id: report.auditId,
         createdAt: report.createdAt || new Date().toISOString(),
@@ -271,7 +217,10 @@ export default function SEOAuditChatbot() {
       setAuditHistory(prev => [entry, ...prev.filter(item => item.id !== entry.id)].slice(0, 25));
       setMessages(prev => [
         ...prev,
-        { role: "bot", content: report.chatMessage || "Audit complete. Switch to the Report tab for full details." }
+        {
+          role: "bot",
+          content: `${report.chatMessage || "Audit complete. Switch to the Report tab for full details."}${report?._meta?.mock ? " This result is using fallback mock data because the live audit service was unavailable." : ""}`
+        }
       ]);
       setActiveTab("chat");
     } catch (error) {
@@ -379,7 +328,7 @@ export default function SEOAuditChatbot() {
             </span>
             {auditReport && (
               <span style={{ marginLeft: "auto", fontSize: 12, color: "#95b3c6", background: "#0b1b29", padding: "3px 10px", borderRadius: 20, border: "1px solid #163a51" }}>
-                {auditUrl.replace(/^https?:\/\//, "").slice(0, 40)}
+                {getDisplayUrl(auditUrl).slice(0, 40)}
               </span>
             )}
           </div>
@@ -390,6 +339,7 @@ export default function SEOAuditChatbot() {
               value={url}
               onChange={e => setUrl(e.target.value)}
               onKeyDown={e => e.key === "Enter" && handleAudit()}
+              aria-label="URL to audit"
               placeholder="https://example.com"
               style={{ flex: 1, background: "#0a1622", border: "1px solid #1c4259", borderRadius: 12, padding: "12px 14px", color: "#e5f2fb", fontSize: 14, fontFamily: "inherit" }}
             />
@@ -397,6 +347,7 @@ export default function SEOAuditChatbot() {
               className="audit-btn"
               onClick={handleAudit}
               disabled={loading}
+              aria-label="Run SEO audit"
               style={{ background: loading ? "#284355" : "linear-gradient(135deg, #22d3ee, #0ea5e9)", color: "#032234", border: "none", borderRadius: 12, padding: "10px 20px", fontSize: 14, fontWeight: 700, fontFamily: "inherit", whiteSpace: "nowrap" }}
             >
               {loading ? "Auditing..." : "Run Audit"}
@@ -506,6 +457,7 @@ export default function SEOAuditChatbot() {
                 value={input}
                 onChange={e => setInput(e.target.value)}
                 onKeyDown={e => e.key === "Enter" && handleSend()}
+                aria-label="Ask a follow-up question"
                 placeholder={auditReport ? "Ask about the audit results..." : "Run an audit first, then ask me anything..."}
                 style={{ flex: 1, background: "none", border: "none", color: "#e5f2fb", fontSize: 14, fontFamily: "inherit" }}
               />
@@ -513,6 +465,7 @@ export default function SEOAuditChatbot() {
                 className="send-btn"
                 onClick={() => handleSend()}
                 disabled={loading || !input.trim()}
+                aria-label="Send follow-up question"
                 style={{
                   background: input.trim() && !loading ? "linear-gradient(135deg, #22d3ee, #0ea5e9)" : "#1b384a",
                   color: input.trim() && !loading ? "#042436" : "#6a879a",
@@ -526,7 +479,7 @@ export default function SEOAuditChatbot() {
                   justifyContent: "center"
                 }}
               >
-                {"->"}
+                Send
               </button>
             </div>
           </div>
@@ -542,6 +495,17 @@ export default function SEOAuditChatbot() {
               </div>
             ) : (
               <>
+                {isMockAudit && (
+                  <div className="surface" style={{ borderRadius: 14, padding: 16, background: "#2b1d09", border: "1px solid #8a641d", color: "#f8ddb0" }}>
+                    <div style={{ fontSize: 12, fontWeight: 700, letterSpacing: "0.08em", textTransform: "uppercase", marginBottom: 8 }}>
+                      Mock Audit Result
+                    </div>
+                    <p style={{ fontSize: 13, lineHeight: 1.6 }}>
+                      This report is fallback data generated because the live Anthropic audit request was unavailable. Use it for UI testing and flow validation, not final SEO decisions.
+                    </p>
+                  </div>
+                )}
+
                 <div className="surface" style={{ borderRadius: 14, padding: 16 }}>
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, marginBottom: 12, flexWrap: "wrap" }}>
                     <div style={{ fontSize: 12, fontWeight: 700, color: "#8ab0c6", letterSpacing: "0.08em", textTransform: "uppercase" }}>
@@ -600,7 +564,7 @@ export default function SEOAuditChatbot() {
                           }}
                         >
                           <span style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-                            <span style={{ fontSize: 13, fontWeight: 600 }}>{item.url.replace(/^https?:\/\//, "").slice(0, 55)}</span>
+                            <span style={{ fontSize: 13, fontWeight: 600 }}>{getDisplayUrl(item.url).slice(0, 55)}</span>
                             <span style={{ fontSize: 11, color: "#86a6bb" }}>{formatAuditDate(item.createdAt)}</span>
                           </span>
                           <span style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, color: "#9ec7de" }}>
@@ -744,9 +708,7 @@ export default function SEOAuditChatbot() {
                     Issues Found
                   </div>
                   <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                    {auditReport.issues
-                      ?.sort((a, b) => ({ critical: 0, warning: 1, info: 2 }[a.severity] - { critical: 0, warning: 1, info: 2 }[b.severity]))
-                      .map((issue, i) => {
+                    {sortedIssues.map((issue, i) => {
                         const cfg = severityConfig[issue.severity] || severityConfig.info;
                         return (
                           <div key={i} className="issue-card surface" style={{ background: cfg.bg, border: `1px solid ${cfg.color}45`, borderLeft: `3px solid ${cfg.color}`, borderRadius: 10, padding: "12px 16px" }}>

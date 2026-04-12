@@ -2,12 +2,18 @@ import { createServer } from "node:http";
 import { readFileSync, existsSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { randomUUID } from "node:crypto";
+import { isIP } from "node:net";
 import { DatabaseSync } from "node:sqlite";
+import { lookup } from "node:dns/promises";
 
 const PORT = Number(process.env.PORT || 8787);
 const ENV_PATH = join(process.cwd(), ".env");
 const DB_PATH = process.env.DATABASE_PATH || join(process.cwd(), "data", "seo-audit.sqlite");
 const ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages";
+const MAX_REQUEST_BYTES = 16 * 1024;
+const MAX_HTML_CHARS = 15000;
+const MAX_TEXT_CHARS = 5000;
+const PAGE_FETCH_TIMEOUT_MS = 12000;
 
 const SYSTEM_PROMPT = `You are an expert SEO auditor. When given a URL and its page content (HTML/text), you analyze it thoroughly and return a JSON audit report.
 
@@ -139,6 +145,31 @@ function sendJson(res, status, body) {
   res.end(JSON.stringify(body));
 }
 
+function getStatusCodeForError(error) {
+  const message = String(error instanceof Error ? error.message : error || "").toLowerCase();
+
+  if (message.includes("too large")) return 413;
+  if (
+    message.includes("valid url") ||
+    message.includes("http and https") ||
+    message.includes("public url") ||
+    message.includes("private network") ||
+    message.includes("valid json")
+  ) {
+    return 400;
+  }
+
+  if (
+    message.includes("timed out") ||
+    message.includes("could not resolve") ||
+    message.includes("http ")
+  ) {
+    return 502;
+  }
+
+  return 500;
+}
+
 function countIssuesBySeverity(issues, severity) {
   return Array.isArray(issues) ? issues.filter(issue => issue?.severity === severity).length : 0;
 }
@@ -209,6 +240,111 @@ function getApiKey() {
 
 function getErrorMessage(data, fallback) {
   return data?.error?.message || data?.message || fallback;
+}
+
+function isPrivateIpv4(address) {
+  const [a, b] = String(address || "").split(".").map(Number);
+  if ([a, b].some(Number.isNaN)) return false;
+  return (
+    a === 10 ||
+    a === 127 ||
+    (a === 169 && b === 254) ||
+    (a === 172 && b >= 16 && b <= 31) ||
+    (a === 192 && b === 168)
+  );
+}
+
+function isPrivateIpv6(address) {
+  const normalized = String(address || "").toLowerCase();
+  return (
+    normalized === "::1" ||
+    normalized.startsWith("fc") ||
+    normalized.startsWith("fd") ||
+    normalized.startsWith("fe80:")
+  );
+}
+
+function isPrivateAddress(address) {
+  const version = isIP(address);
+  if (version === 4) return isPrivateIpv4(address);
+  if (version === 6) return isPrivateIpv6(address);
+  return false;
+}
+
+async function validatePublicHttpUrl(rawUrl) {
+  let parsed;
+  try {
+    parsed = new URL(String(rawUrl || "").trim());
+  } catch {
+    throw new Error("Please enter a valid URL.");
+  }
+
+  if (!["http:", "https:"].includes(parsed.protocol)) {
+    throw new Error("Only http and https URLs are supported.");
+  }
+
+  const hostname = parsed.hostname.toLowerCase();
+  if (!hostname) {
+    throw new Error("Please enter a valid public URL.");
+  }
+
+  if (hostname === "localhost" || hostname.endsWith(".local")) {
+    throw new Error("Local or private URLs are not allowed.");
+  }
+
+  if (isPrivateAddress(hostname)) {
+    throw new Error("Private network URLs are not allowed.");
+  }
+
+  try {
+    const resolved = await lookup(hostname, { all: true });
+    if (!resolved.length || resolved.some(entry => isPrivateAddress(entry.address))) {
+      throw new Error("Private network URLs are not allowed.");
+    }
+  } catch (error) {
+    if (error instanceof Error && error.message === "Private network URLs are not allowed.") {
+      throw error;
+    }
+    throw new Error("Could not resolve that URL. Please try a public page.");
+  }
+
+  return parsed.toString();
+}
+
+async function fetchPageContent(url) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), PAGE_FETCH_TIMEOUT_MS);
+
+  try {
+    const response = await fetch(url, {
+      signal: controller.signal,
+      redirect: "follow",
+      headers: {
+        "user-agent": "SEOAuditBot/1.0 (+https://localhost)"
+      }
+    });
+
+    if (!response.ok) {
+      throw new Error(`The page responded with HTTP ${response.status}.`);
+    }
+
+    const html = await response.text();
+    return html;
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") {
+      throw new Error("Fetching the page timed out.");
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function extractPageInfo(html) {
+  if (!html) return { text: "", html: "" };
+  const truncatedHtml = String(html).slice(0, MAX_HTML_CHARS);
+  const text = truncatedHtml.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim().slice(0, MAX_TEXT_CHARS);
+  return { text, html: truncatedHtml };
 }
 
 async function parseJsonResponse(response, fallbackMessage) {
@@ -440,9 +576,24 @@ function parseAuditJson(raw) {
 
 async function readRequestBody(req) {
   const chunks = [];
-  for await (const chunk of req) chunks.push(chunk);
+  let totalBytes = 0;
+
+  for await (const chunk of req) {
+    totalBytes += chunk.length;
+    if (totalBytes > MAX_REQUEST_BYTES) {
+      throw new Error("Request body is too large.");
+    }
+    chunks.push(chunk);
+  }
+
   const raw = Buffer.concat(chunks).toString("utf8");
-  return raw ? JSON.parse(raw) : {};
+  if (!raw) return {};
+
+  try {
+    return JSON.parse(raw);
+  } catch {
+    throw new Error("Request body must be valid JSON.");
+  }
 }
 
 async function callAnthropic(payload) {
@@ -470,7 +621,11 @@ async function callAnthropic(payload) {
 }
 
 async function handleAudit(req, res) {
-  const { url, pageContent } = await readRequestBody(req);
+  const { url } = await readRequestBody(req);
+  const normalizedUrl = await validatePublicHttpUrl(url);
+  const html = await fetchPageContent(normalizedUrl);
+  const pageContent = extractPageInfo(html);
+
   try {
     const data = await callAnthropic({
       model: "claude-sonnet-4-20250514",
@@ -479,20 +634,20 @@ async function handleAudit(req, res) {
       messages: [
         {
           role: "user",
-          content: `Please audit this URL: ${url}\n\nPage HTML (truncated):\n${pageContent?.html || ""}\n\nExtracted text:\n${pageContent?.text || ""}`
+          content: `Please audit this URL: ${normalizedUrl}\n\nPage HTML (truncated):\n${pageContent?.html || ""}\n\nExtracted text:\n${pageContent?.text || ""}`
         }
       ]
     });
 
     const raw = data.content?.[0]?.text || "{}";
     const report = parseAuditJson(raw);
-    const entry = saveAudit(url, report);
+    const entry = saveAudit(normalizedUrl, report);
     sendJson(res, 200, { auditId: entry.id, createdAt: entry.createdAt, ...report });
   } catch (error) {
     if (!shouldUseMockFallback(error)) throw error;
     console.warn("Using mock audit fallback:", error instanceof Error ? error.message : error);
-    const report = generateMockAudit(url, pageContent);
-    const entry = saveAudit(url, report);
+    const report = generateMockAudit(normalizedUrl, pageContent);
+    const entry = saveAudit(normalizedUrl, report);
     sendJson(res, 200, { auditId: entry.id, createdAt: entry.createdAt, ...report });
   }
 }
@@ -564,7 +719,7 @@ const server = createServer(async (req, res) => {
 
     sendJson(res, 404, { error: "Not found" });
   } catch (error) {
-    sendJson(res, 500, {
+    sendJson(res, getStatusCodeForError(error), {
       error: error instanceof Error ? error.message : "Server error"
     });
   }
