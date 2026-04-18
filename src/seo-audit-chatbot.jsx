@@ -99,6 +99,22 @@ async function clearAuditHistory() {
   return Boolean(data?.success);
 }
 
+function SkeletonLoader({ width = "100%", height = "20px", borderRadius = "4px", className = "" }) {
+  return (
+    <div
+      className={className}
+      style={{
+        width,
+        height,
+        background: "linear-gradient(90deg, #1a3448 25%, #2a4159 50%, #1a3448 75%)",
+        backgroundSize: "200% 100%",
+        animation: "shimmer 1.5s infinite",
+        borderRadius
+      }}
+    />
+  );
+}
+
 function formatAuditDate(dateString) {
   const dt = new Date(dateString);
   if (Number.isNaN(dt.getTime())) return "";
@@ -122,6 +138,8 @@ export default function SEOAuditChatbot() {
   const [currentAuditId, setCurrentAuditId] = useState("");
   const [auditHistory, setAuditHistory] = useState([]);
   const [loadingMsg, setLoadingMsg] = useState("");
+  const [loadingProgress, setLoadingProgress] = useState(0);
+  const [loadingPhase, setLoadingPhase] = useState("");
   const messagesEndRef = useRef(null);
 
   useEffect(() => {
@@ -155,10 +173,10 @@ export default function SEOAuditChatbot() {
   }, []);
 
   const loadingSteps = [
-    "Fetching page content...",
-    "Analyzing on-page SEO signals...",
-    "Evaluating content quality...",
-    "Generating prioritized recommendations..."
+    { message: "Fetching page content...", progress: 10, phase: "fetching" },
+    { message: "Analyzing on-page SEO signals...", progress: 30, phase: "analyzing" },
+    { message: "Evaluating content quality...", progress: 60, phase: "content" },
+    { message: "Generating prioritized recommendations...", progress: 90, phase: "recommendations" }
   ];
 
   const quickPrompts = [
@@ -193,14 +211,22 @@ export default function SEOAuditChatbot() {
     setMessages(prev => [...prev, { role: "user", content: "Audit this URL: " + cleanUrl }]);
 
     let step = 0;
-    setLoadingMsg(loadingSteps[0]);
+    setLoadingMsg(loadingSteps[0].message);
+    setLoadingProgress(loadingSteps[0].progress);
+    setLoadingPhase(loadingSteps[0].phase);
+
     const interval = setInterval(() => {
       step = (step + 1) % loadingSteps.length;
-      setLoadingMsg(loadingSteps[step]);
+      setLoadingMsg(loadingSteps[step].message);
+      setLoadingProgress(loadingSteps[step].progress);
+      setLoadingPhase(loadingSteps[step].phase);
     }, 1800);
 
     try {
       const report = await runAudit(cleanUrl);
+      setLoadingProgress(100);
+      setLoadingPhase("complete");
+
       const entry = {
         id: report.auditId,
         createdAt: report.createdAt || new Date().toISOString(),
@@ -235,6 +261,8 @@ export default function SEOAuditChatbot() {
       clearInterval(interval);
       setLoading(false);
       setLoadingMsg("");
+      setLoadingProgress(0);
+      setLoadingPhase("");
     }
   }
 
@@ -246,10 +274,14 @@ export default function SEOAuditChatbot() {
     setMessages(prev => [...prev, { role: "user", content: question }]);
     setLoading(true);
     setLoadingMsg("Thinking...");
+    setLoadingProgress(50);
+    setLoadingPhase("thinking");
 
     try {
       if (auditReport) {
         const answer = await askFollowUp(auditUrl, auditReport, question, messages, currentAuditId);
+        setLoadingProgress(100);
+        setLoadingPhase("complete");
         setMessages(prev => [...prev, { role: "bot", content: answer }]);
       } else {
         setMessages(prev => [
@@ -265,6 +297,8 @@ export default function SEOAuditChatbot() {
     } finally {
       setLoading(false);
       setLoadingMsg("");
+      setLoadingProgress(0);
+      setLoadingPhase("");
     }
   }
 
@@ -312,6 +346,10 @@ export default function SEOAuditChatbot() {
           .stack-mobile { flex-direction: column; align-items: stretch !important; }
           .chat-bubble { max-width: 88% !important; }
           .stats-grid { grid-template-columns: 1fr !important; }
+        }
+        @keyframes shimmer {
+          0% { background-position: -200% 0; }
+          100% { background-position: 200% 0; }
         }
       `}</style>
 
@@ -381,6 +419,65 @@ export default function SEOAuditChatbot() {
               </button>
             ))}
           </div>
+
+          {loading && (
+            <div className="surface" style={{ borderRadius: 12, padding: "16px 20px", marginBottom: 16, background: "linear-gradient(135deg, #0d1a25 0%, #0a1620 100%)" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 12 }}>
+                <div style={{ width: 32, height: 32, borderRadius: 8, background: "linear-gradient(135deg, #22d3ee, #0ea5e9)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 14, fontWeight: 700, color: "#042436" }}>
+                  SA
+                </div>
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontSize: 14, fontWeight: 600, color: "#22d3ee", marginBottom: 2 }}>
+                    {loadingMsg}
+                  </div>
+                  <div style={{ fontSize: 12, color: "#7be4f8" }}>
+                    {loadingPhase === "fetching" && "Connecting to the target website..."}
+                    {loadingPhase === "analyzing" && "Examining HTML structure and metadata..."}
+                    {loadingPhase === "content" && "Evaluating readability and keyword usage..."}
+                    {loadingPhase === "recommendations" && "Compiling actionable insights..."}
+                    {loadingPhase === "thinking" && "Analyzing your question..."}
+                    {loadingPhase === "complete" && "Finalizing results..."}
+                  </div>
+                </div>
+              </div>
+
+              <div style={{ position: "relative", height: 6, background: "#1a3448", borderRadius: 3, overflow: "hidden" }}>
+                <div
+                  style={{
+                    position: "absolute",
+                    left: 0,
+                    top: 0,
+                    height: "100%",
+                    background: "linear-gradient(90deg, #22d3ee, #0ea5e9)",
+                    borderRadius: 3,
+                    width: `${loadingProgress}%`,
+                    transition: "width 0.3s ease",
+                    boxShadow: "0 0 10px rgba(34, 211, 238, 0.3)"
+                  }}
+                />
+              </div>
+
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 8 }}>
+                <span style={{ fontSize: 11, color: "#6f8fa4" }}>
+                  {loadingProgress}% complete
+                </span>
+                <div style={{ display: "flex", gap: 2 }}>
+                  {[0, 1, 2].map(idx => (
+                    <div
+                      key={idx}
+                      style={{
+                        width: 4,
+                        height: 4,
+                        borderRadius: "50%",
+                        background: "#22d3ee",
+                        animation: `pulse 1.2s ${idx * 0.2}s infinite`
+                      }}
+                    />
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
         </div>
       </div>
 
@@ -418,17 +515,29 @@ export default function SEOAuditChatbot() {
                   <div style={{ width: 28, height: 28, background: "linear-gradient(135deg, #22d3ee, #0ea5e9)", borderRadius: 8, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, fontWeight: 700, color: "#042436", flexShrink: 0 }}>
                     SA
                   </div>
-                  <div className="surface" style={{ borderRadius: "14px 14px 14px 4px", padding: "10px 14px" }}>
-                    <div style={{ fontSize: 13, color: "#7be4f8", marginBottom: 4 }} className="pulse">
+                  <div className="surface" style={{ borderRadius: "14px 14px 14px 4px", padding: "12px 16px", minWidth: 200 }}>
+                    <div style={{ fontSize: 13, color: "#7be4f8", marginBottom: 8 }}>
                       {loadingMsg}
                     </div>
-                    <div style={{ display: "flex", gap: 4 }}>
-                      {[0, 1, 2].map(idx => (
+                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      <div style={{ flex: 1, height: 4, background: "#1a3448", borderRadius: 2, overflow: "hidden" }}>
                         <div
-                          key={idx}
-                          style={{ width: 6, height: 6, borderRadius: "50%", background: "#22d3ee", animation: `pulse 1.2s ${idx * 0.2}s infinite` }}
+                          style={{
+                            height: "100%",
+                            background: "linear-gradient(90deg, #22d3ee, #0ea5e9)",
+                            width: `${loadingProgress}%`,
+                            transition: "width 0.3s ease"
+                          }}
                         />
-                      ))}
+                      </div>
+                      <div style={{ display: "flex", gap: 2 }}>
+                        {[0, 1, 2].map(idx => (
+                          <div
+                            key={idx}
+                            style={{ width: 4, height: 4, borderRadius: "50%", background: "#22d3ee", animation: `pulse 1.2s ${idx * 0.2}s infinite` }}
+                          />
+                        ))}
+                      </div>
                     </div>
                   </div>
                 </div>
@@ -487,12 +596,63 @@ export default function SEOAuditChatbot() {
 
         {activeTab === "report" && (
           <div style={{ paddingTop: 20, overflowY: "auto", flex: 1, display: "flex", flexDirection: "column", gap: 20 }}>
-            {!auditReport ? (
+            {!auditReport && !loading ? (
               <div className="surface" style={{ textAlign: "center", padding: "60px 20px", color: "#6f8fa4", borderRadius: 16 }}>
                 <div style={{ fontSize: 28, marginBottom: 12, color: "#22d3ee", fontFamily: "'Syne', sans-serif" }}>REPORT</div>
                 <div style={{ fontSize: 16, fontWeight: 500, color: "#d7eaf8" }}>No audit yet</div>
                 <div style={{ fontSize: 13, marginTop: 6 }}>Enter a URL and run an audit to see the full report here.</div>
               </div>
+            ) : loading ? (
+              <>
+                <div className="surface" style={{ borderRadius: 16, padding: 24, display: "flex", gap: 24, alignItems: "center", flexWrap: "wrap" }}>
+                  <div style={{ position: "relative", width: 90, height: 90, flexShrink: 0 }}>
+                    <SkeletonLoader width="90px" height="90px" borderRadius="50%" />
+                  </div>
+                  <div style={{ flex: 1 }}>
+                    <SkeletonLoader width="120px" height="24px" className="msg-appear" style={{ marginBottom: 12 }} />
+                    <SkeletonLoader width="100%" height="16px" className="msg-appear" style={{ marginBottom: 8, animationDelay: "0.1s" }} />
+                    <SkeletonLoader width="80%" height="16px" className="msg-appear" style={{ animationDelay: "0.2s" }} />
+                  </div>
+                </div>
+
+                <div className="stats-grid" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+                  <div className="surface" style={{ borderRadius: 14, padding: 20 }}>
+                    <SkeletonLoader width="140px" height="16px" className="msg-appear" style={{ marginBottom: 14 }} />
+                    {Array.from({ length: 6 }).map((_, i) => (
+                      <div key={i} style={{ display: "flex", justifyContent: "space-between", padding: "10px 0", borderBottom: "1px solid #163348", gap: 8 }}>
+                        <SkeletonLoader width="80px" height="13px" className="msg-appear" style={{ animationDelay: `${0.1 + i * 0.05}s` }} />
+                        <SkeletonLoader width="60px" height="13px" className="msg-appear" style={{ animationDelay: `${0.15 + i * 0.05}s` }} />
+                      </div>
+                    ))}
+                  </div>
+
+                  <div className="surface" style={{ borderRadius: 14, padding: 20 }}>
+                    <SkeletonLoader width="140px" height="16px" className="msg-appear" style={{ marginBottom: 14 }} />
+                    {Array.from({ length: 5 }).map((_, i) => (
+                      <div key={i} style={{ display: "flex", justifyContent: "space-between", padding: "10px 0", borderBottom: "1px solid #163348", gap: 8 }}>
+                        <SkeletonLoader width="80px" height="13px" className="msg-appear" style={{ animationDelay: `${0.1 + i * 0.05}s` }} />
+                        <SkeletonLoader width="60px" height="13px" className="msg-appear" style={{ animationDelay: `${0.15 + i * 0.05}s` }} />
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                <div>
+                  <SkeletonLoader width="120px" height="16px" className="msg-appear" style={{ marginBottom: 12 }} />
+                  <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                    {Array.from({ length: 3 }).map((_, i) => (
+                      <div key={i} className="surface issue-card" style={{ background: "#0f1f2b", border: "1px solid #1a3448", borderLeft: "3px solid #22d3ee", borderRadius: 10, padding: "12px 16px" }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+                          <SkeletonLoader width="16px" height="16px" borderRadius="50%" className="msg-appear" style={{ animationDelay: `${0.1 + i * 0.1}s` }} />
+                          <SkeletonLoader width="150px" height="13px" className="msg-appear" style={{ animationDelay: `${0.15 + i * 0.1}s` }} />
+                        </div>
+                        <SkeletonLoader width="100%" height="13px" className="msg-appear" style={{ marginBottom: 6, animationDelay: `${0.2 + i * 0.1}s` }} />
+                        <SkeletonLoader width="90%" height="12px" className="msg-appear" style={{ animationDelay: `${0.25 + i * 0.1}s` }} />
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </>
             ) : (
               <>
                 {isMockAudit && (
