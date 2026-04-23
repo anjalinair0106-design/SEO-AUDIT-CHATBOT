@@ -8,22 +8,22 @@
 
 Paste a public URL and get a prioritized SEO audit, a structured report, and follow-up answers grounded in the latest audit.
 
-## � Table of Contents
+## Table of Contents
 
-- [Overview](#-overview)
-- [Features](#-features)
-- [Tech Stack](#-tech-stack)
-- [Prerequisites](#-prerequisites)
-- [Setup](#-setup)
-- [Run Locally](#️-run-locally)
-- [Available Scripts](#-available-scripts)
-- [How Audits Work](#-how-audits-work)
-- [Project Structure](#-project-structure)
-- [Current Limitations](#️-current-limitations)
-- [Planned Features](#-planned-features)
-- [License](#-license)
+- [Overview](#overview)
+- [Features](#features)
+- [Tech Stack](#tech-stack)
+- [Prerequisites](#prerequisites)
+- [Setup](#setup)
+- [Run Locally](#run-locally)
+- [Available Scripts](#available-scripts)
+- [How Audits Work](#how-audits-work)
+- [Project Structure](#project-structure)
+- [Current Limitations](#current-limitations)
+- [Planned Features](#planned-features)
+- [License](#license)
 
-## �📋 Overview
+## Overview
 
 SEOAudit is a React + Node application with two parts:
 
@@ -35,7 +35,7 @@ Results appear in two views:
 - Chat: conversational summary and follow-up Q&A
 - Report: score, issue breakdown, content stats, and saved audit comparisons
 
-## ✨ Features
+## Features
 
 - On-page SEO checks for title, meta description, headings, canonical tag, and robots meta
 - Content checks for word count, readability, image alt coverage, and keyword targeting notes
@@ -44,21 +44,21 @@ Results appear in two views:
 - Follow-up chat grounded in the selected audit report
 - Explicit mock fallback mode when the live Anthropic request is unavailable
 
-## 🛠️ Tech Stack
+## Tech Stack
 
 - **Frontend:** React 19 + Vite
 - **Backend:** Node.js HTTP server
 - **AI:** Anthropic Messages API
 - **Storage:** SQLite via `node:sqlite`
 
-## 📦 Prerequisites
+## Prerequisites
 
 - **Node.js** 22+
 - **Anthropic API key** ([Get one here](https://console.anthropic.com/))
 
 `node:sqlite` requires a modern Node runtime. If you are on an older version, upgrade Node before running the app.
 
-## 🚀 Setup
+## Setup
 
 ```bash
 npm install
@@ -73,7 +73,7 @@ DATABASE_PATH=./data/seo-audit.sqlite
 MOCK_AUDITS=false
 ```
 
-## ▶️ Run Locally
+## Run Locally
 
 Start the API server in one terminal:
 
@@ -91,7 +91,7 @@ Open `http://localhost:5173`.
 
 Vite proxies `/api` requests to `http://localhost:8787` during local development.
 
-## 📝 Available Scripts
+## Available Scripts
 
 | Command | Description |
 |---------|-------------|
@@ -101,7 +101,7 @@ Vite proxies `/api` requests to `http://localhost:8787` during local development
 | `npm run preview` | Preview the production frontend build |
 | `npm run lint` | Run ESLint |
 
-## 🔍 How Audits Work
+## How Audits Work
 
 1. The frontend sends a URL to `/api/audit`
 2. The backend validates the URL and blocks obvious local/private targets
@@ -112,7 +112,7 @@ Vite proxies `/api` requests to `http://localhost:8787` during local development
 
 If the Anthropic request fails for supported fallback cases, the app returns a clearly marked mock audit so the interface still works during development.
 
-## 📁 Project Structure
+## Project Structure
 
 ```text
 seo-audit-chatbot/
@@ -129,14 +129,14 @@ seo-audit-chatbot/
 `-- README.md
 ```
 
-## ⚠️ Current Limitations
+## Current Limitations
 
 - Single-page audits only
 - No Core Web Vitals or PageSpeed integration yet
 - No backlink analysis
 - No authenticated-page support
 
-## 🚧 Planned Features
+## Planned Features
 
 - PageSpeed Insights integration
 - PDF or CSV export
@@ -144,6 +144,6 @@ seo-audit-chatbot/
 - Bulk URL auditing
 - Scheduled re-audits and alerts
 
-## 📄 License
+## License
 
 This project is licensed under the [MIT License](LICENSE).
